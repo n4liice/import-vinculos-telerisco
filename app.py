@@ -68,33 +68,37 @@ async def run_rpa(username: str, password: str) -> bytes:
             await page.click("button:has-text('XLS')")
 
             # ── 7. MODAL DE CONFIRMAÇÃO ───────────────────────────────────────
-            # Aguarda qualquer botão de confirmação aparecer no modal bootbox
-            await page.wait_for_selector(".bootbox", timeout=20000)
-            await page.screenshot(path=LAST_SCREENSHOT)
-
-            # Tenta variações do botão de confirmação
-            confirmed = False
-            for selector in [
-                ".bootbox-footer button:has-text('Sim')",
-                ".bootbox-footer button:has-text('sim')",
-                ".bootbox-footer button:has-text('OK')",
-                ".bootbox-footer button:has-text('Ok')",
-                ".bootbox-footer .btn-primary",
-                ".modal-footer .btn-primary",
-                ".bootbox button.btn-primary",
-            ]:
-                try:
-                    btn = page.locator(selector).first
-                    if await btn.is_visible(timeout=2000):
-                        await btn.click()
-                        confirmed = True
-                        break
-                except Exception:
-                    continue
-
-            if not confirmed:
+            # Aguarda bootbox VISÍVEL (não apenas existir no DOM)
+            try:
+                await page.locator(".bootbox").wait_for(state="visible", timeout=15000)
+            except Exception:
+                # Sem modal: exportação pode ter sido enfileirada diretamente
                 await page.screenshot(path=LAST_SCREENSHOT)
-                raise HTTPException(500, "Não foi possível clicar no botão de confirmação do modal.")
+                pass
+            else:
+                await page.screenshot(path=LAST_SCREENSHOT)
+                confirmed = False
+                for selector in [
+                    ".bootbox-footer button:has-text('Sim')",
+                    ".bootbox-footer button:has-text('OK')",
+                    ".bootbox-footer button:has-text('Ok')",
+                    ".bootbox-footer .btn-primary",
+                    ".modal-footer .btn-primary",
+                    ".bootbox button.btn-primary",
+                    ".bootbox button",
+                ]:
+                    try:
+                        btn = page.locator(selector).first
+                        if await btn.is_visible(timeout=2000):
+                            await btn.click()
+                            confirmed = True
+                            break
+                    except Exception:
+                        continue
+
+                if not confirmed:
+                    await page.screenshot(path=LAST_SCREENSHOT)
+                    raise HTTPException(500, "Não foi possível clicar no botão de confirmação do modal.")
 
             # ── 8. TELA DE DOWNLOADS ──────────────────────────────────────────
             await page.wait_for_url("**servico-download**", timeout=15000)
