@@ -1,9 +1,17 @@
 import asyncio
+import logging
 import os
 from datetime import datetime
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import Response, FileResponse
 from playwright.async_api import async_playwright
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%H:%M:%S",
+)
+log = logging.getLogger("rpa")
 
 LAST_SCREENSHOT = "/tmp/last_screenshot.png"
 
@@ -35,45 +43,58 @@ async def run_rpa(username: str, password: str) -> bytes:
 
         try:
             # ── 1. VITRINE ────────────────────────────────────────────────────
+            log.info("ETAPA 1: Abrindo vitrine...")
             await page.goto(VITRINE_URL, wait_until="networkidle", timeout=30000)
 
             # ── 2. LOGIN (Keycloak) ───────────────────────────────────────────
+            log.info("ETAPA 2: Aguardando formulário de login (Keycloak)...")
             await page.wait_for_selector("#username", timeout=20000)
             await page.fill("#username", username)
             await page.fill("#password", password)
             await page.click("#kc-login")
+            log.info("ETAPA 2: Credenciais enviadas, aguardando redirect...")
 
             await page.wait_for_url(f"{VITRINE_URL}**", timeout=30000)
             await page.wait_for_load_state("networkidle")
+            log.info("ETAPA 2: Login OK — na vitrine.")
 
             # ── 3. CONTROLE DE VÍNCULOS ───────────────────────────────────────
+            log.info("ETAPA 3: Clicando em 'Controle de Vínculos'...")
             await page.click('a[href="https://api.telerisco.com.br/telerisco/operacional/"]')
             await page.wait_for_url(f"{APP_URL}**", timeout=30000)
             await page.wait_for_load_state("networkidle")
+            log.info("ETAPA 3: App Angular carregado.")
 
             # ── 4. ABA VÍNCULOS → MOTORISTA ───────────────────────────────────
+            log.info("ETAPA 4: Navegando para #/vinculo e selecionando MOTORISTA...")
             await page.goto(f"{APP_URL}#/vinculo", wait_until="networkidle")
             await page.wait_for_selector("input[value='MOTORISTA']", timeout=15000)
             await page.click("input[value='MOTORISTA']")
             await page.wait_for_load_state("networkidle")
+            log.info("ETAPA 4: MOTORISTA selecionado.")
 
             # ── 5. CONSULTAR ──────────────────────────────────────────────────
+            log.info("ETAPA 5: Clicando em 'Consultar'...")
             await page.wait_for_selector("button:has-text('Consultar')", timeout=15000)
             await page.click("button:has-text('Consultar')")
             await page.wait_for_selector("button:has-text('Exportar')", timeout=30000)
+            log.info("ETAPA 5: Resultados carregados — botão Exportar visível.")
 
             # ── 6. EXPORTAR → XLS ─────────────────────────────────────────────
+            log.info("ETAPA 6: Clicando em 'Exportar'...")
             await page.click("button:has-text('Exportar')")
             await page.wait_for_selector("button:has-text('XLS')", timeout=10000)
+            log.info("ETAPA 6: Modal de formato aberto — clicando em XLS...")
             await page.click("button:has-text('XLS')")
 
             # ── 7. MODAL DE CONFIRMAÇÃO ───────────────────────────────────────
+            log.info("ETAPA 7: Aguardando modal de confirmação...")
             try:
                 await page.locator(".bootbox").wait_for(state="visible", timeout=15000)
                 await asyncio.sleep(1)
                 await page.screenshot(path=LAST_SCREENSHOT, full_page=True)
+                log.info("ETAPA 7: Modal visível — procurando botão 'Sim'...")
 
-                # Clica em "Sim" — procura por texto, fallback no último botão do footer
                 clicked = await page.evaluate("""
                     () => {
                         const containers = ['.bootbox-footer', '.modal-footer', '.bootbox', '.modal'];
@@ -81,10 +102,8 @@ async def run_rpa(username: str, password: str) -> bytes:
                             const el = document.querySelector(cont);
                             if (!el) continue;
                             const btns = Array.from(el.querySelectorAll('button'));
-                            // Tenta achar "Sim" pelo texto
                             const sim = btns.find(b => b.textContent.trim().toLowerCase() === 'sim');
                             if (sim) { sim.click(); return 'Sim'; }
-                            // Fallback: último botão (geralmente é o de confirmação)
                             if (btns.length > 0) {
                                 const last = btns[btns.length - 1];
                                 last.click();
@@ -99,22 +118,28 @@ async def run_rpa(username: str, password: str) -> bytes:
                     modal_html = await page.locator(".bootbox").inner_html()
                     raise HTTPException(500, f"Modal visível mas sem botão. HTML: {modal_html[:800]}")
 
+                log.info(f"ETAPA 7: Botão clicado — '{clicked}'")
+
             except HTTPException:
                 raise
-            except Exception:
-                # Sem modal visível: exportação pode ter sido enfileirada diretamente
+            except Exception as e:
+                log.info(f"ETAPA 7: Modal não apareceu ({e}) — assumindo exportação direta.")
                 await page.screenshot(path=LAST_SCREENSHOT, full_page=True)
 
             # ── 8. TELA DE DOWNLOADS ──────────────────────────────────────────
-            # Aguarda redirecionamento automático ou navega diretamente
+            log.info("ETAPA 8: Aguardando navegação para servico-download...")
             try:
                 await page.wait_for_url("**servico-download**", timeout=10000)
+                log.info("ETAPA 8: Redirecionado automaticamente.")
             except Exception:
+                log.info("ETAPA 8: Sem redirect — navegando manualmente para servico-download...")
                 await page.goto(f"{APP_URL}#/servico-download", wait_until="networkidle", timeout=15000)
             await page.wait_for_load_state("networkidle")
+            log.info(f"ETAPA 8: Na tela de downloads. URL: {page.url}")
 
             # ── 9. POLLING: aguarda "Finalizado" ──────────────────────────────
             await page.screenshot(path=LAST_SCREENSHOT, full_page=True)
+            log.info("ETAPA 9: Iniciando polling do status do XLS (máx 6 min)...")
 
             xls_filename = None
             last_item_debug = None
@@ -127,16 +152,16 @@ async def run_rpa(username: str, password: str) -> bytes:
                         if (!el) return null;
                         const scope = angular.element(el).scope();
                         if (!scope) return null;
-                        // Tenta diferentes nomes de propriedade
                         const list = scope.sortedAndPaginatedList
-                                  || scope.vm && scope.vm.sortedAndPaginatedList
-                                  || scope.$ctrl && scope.$ctrl.sortedAndPaginatedList;
+                                  || (scope.vm && scope.vm.sortedAndPaginatedList)
+                                  || (scope.$ctrl && scope.$ctrl.sortedAndPaginatedList);
                         if (!list || !list.length) return null;
                         return list[0];
                     }
                 """)
 
                 if not item:
+                    log.info(f"ETAPA 9: tentativa {attempt+1}/36 — tabela vazia, aguardando 5s...")
                     if attempt == 0:
                         await page.screenshot(path=LAST_SCREENSHOT, full_page=True)
                     await asyncio.sleep(5)
@@ -147,9 +172,11 @@ async def run_rpa(username: str, password: str) -> bytes:
                 status = item.get("status", "")
                 tipo   = item.get("tipoFila", "")
                 cpf    = item.get("cpfUsu", "")
+                log.info(f"ETAPA 9: tentativa {attempt+1}/36 — status='{status}' tipo='{tipo}' cpf='{cpf}'")
 
                 if status == "Finalizado" and "XLS" in tipo:
                     xls_filename = f"{cpf}.{tipo}"
+                    log.info(f"ETAPA 9: Finalizado! Arquivo: {xls_filename}")
                     break
 
                 if status in ("Aguardando", "Em Processamento"):
@@ -165,6 +192,7 @@ async def run_rpa(username: str, password: str) -> bytes:
                 raise HTTPException(504, f"Timeout: XLS não ficou disponível. {debug}")
 
             # ── 10. DOWNLOAD ──────────────────────────────────────────────────
+            log.info("ETAPA 10: Iniciando download do arquivo XLS...")
             async with page.expect_download(timeout=60000) as dl_info:
                 await page.evaluate(f"""
                     () => {{
@@ -186,12 +214,14 @@ async def run_rpa(username: str, password: str) -> bytes:
             with open(save_path, "rb") as f:
                 xls_bytes = f.read()
 
+            log.info(f"ETAPA 10: Download concluído — {len(xls_bytes)} bytes.")
             return xls_bytes
 
         except HTTPException:
             raise
         except Exception as e:
             await page.screenshot(path=LAST_SCREENSHOT)
+            log.error(f"ERRO inesperado: {e}")
             raise HTTPException(500, f"Erro no RPA: {str(e)}")
         finally:
             await browser.close()
@@ -204,7 +234,7 @@ async def health():
     return {"status": "ok", "service": "Telerisco RPA"}
 
 
-@app.get("/screenshot", summary="Retorna screenshot do último erro")
+@app.get("/screenshot", summary="Retorna screenshot do último estado capturado")
 async def screenshot():
     if not os.path.exists(LAST_SCREENSHOT):
         raise HTTPException(404, "Nenhum screenshot disponível.")
@@ -229,6 +259,7 @@ async def exportar_motoristas(
             "Informe usuario/senha via query-param ou variáveis TELERISCO_USER / TELERISCO_PASS"
         )
 
+    log.info(f"Requisição recebida para usuário: {user}")
     xls_bytes = await run_rpa(user, pwd)
 
     filename = f"motoristas_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xls"
