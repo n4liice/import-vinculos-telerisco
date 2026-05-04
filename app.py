@@ -73,19 +73,23 @@ async def run_rpa(username: str, password: str) -> bytes:
                 await asyncio.sleep(1)
                 await page.screenshot(path=LAST_SCREENSHOT, full_page=True)
 
-                # Tenta clique via JavaScript direto (ignora seletor CSS)
+                # Clica em "Sim" — procura por texto, fallback no último botão do footer
                 clicked = await page.evaluate("""
                     () => {
-                        const selectors = [
-                            '.bootbox-footer button',
-                            '.modal-footer button',
-                            '.bootbox button',
-                            '.modal button.btn-primary',
-                            '.modal button',
-                        ];
-                        for (const sel of selectors) {
-                            const btn = document.querySelector(sel);
-                            if (btn) { btn.click(); return btn.textContent.trim(); }
+                        const containers = ['.bootbox-footer', '.modal-footer', '.bootbox', '.modal'];
+                        for (const cont of containers) {
+                            const el = document.querySelector(cont);
+                            if (!el) continue;
+                            const btns = Array.from(el.querySelectorAll('button'));
+                            // Tenta achar "Sim" pelo texto
+                            const sim = btns.find(b => b.textContent.trim().toLowerCase() === 'sim');
+                            if (sim) { sim.click(); return 'Sim'; }
+                            // Fallback: último botão (geralmente é o de confirmação)
+                            if (btns.length > 0) {
+                                const last = btns[btns.length - 1];
+                                last.click();
+                                return last.textContent.trim();
+                            }
                         }
                         return null;
                     }
@@ -110,8 +114,11 @@ async def run_rpa(username: str, password: str) -> bytes:
             await page.wait_for_load_state("networkidle")
 
             # ── 9. POLLING: aguarda "Finalizado" ──────────────────────────────
+            await page.screenshot(path=LAST_SCREENSHOT, full_page=True)
+
             xls_filename = None
-            for _ in range(36):
+            last_item_debug = None
+            for attempt in range(36):
                 await page.wait_for_load_state("networkidle")
 
                 item = await page.evaluate("""
@@ -119,17 +126,24 @@ async def run_rpa(username: str, password: str) -> bytes:
                         const el = document.querySelector('table');
                         if (!el) return null;
                         const scope = angular.element(el).scope();
-                        const list = scope && scope.sortedAndPaginatedList;
+                        if (!scope) return null;
+                        // Tenta diferentes nomes de propriedade
+                        const list = scope.sortedAndPaginatedList
+                                  || scope.vm && scope.vm.sortedAndPaginatedList
+                                  || scope.$ctrl && scope.$ctrl.sortedAndPaginatedList;
                         if (!list || !list.length) return null;
                         return list[0];
                     }
                 """)
 
                 if not item:
+                    if attempt == 0:
+                        await page.screenshot(path=LAST_SCREENSHOT, full_page=True)
                     await asyncio.sleep(5)
                     await page.reload()
                     continue
 
+                last_item_debug = item
                 status = item.get("status", "")
                 tipo   = item.get("tipoFila", "")
                 cpf    = item.get("cpfUsu", "")
@@ -146,7 +160,9 @@ async def run_rpa(username: str, password: str) -> bytes:
                 raise HTTPException(500, f"Status inesperado: {status}")
 
             if not xls_filename:
-                raise HTTPException(504, "Timeout: XLS não ficou disponível em 6 minutos.")
+                await page.screenshot(path=LAST_SCREENSHOT, full_page=True)
+                debug = f"Último item: {last_item_debug}" if last_item_debug else "Nenhum item encontrado na tabela."
+                raise HTTPException(504, f"Timeout: XLS não ficou disponível. {debug}")
 
             # ── 10. DOWNLOAD ──────────────────────────────────────────────────
             async with page.expect_download(timeout=60000) as dl_info:
