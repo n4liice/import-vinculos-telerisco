@@ -2,7 +2,8 @@ import asyncio
 import logging
 import os
 from datetime import datetime
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Security
+from fastapi.security.api_key import APIKeyHeader
 from fastapi.responses import Response, FileResponse
 from playwright.async_api import async_playwright
 
@@ -19,9 +20,18 @@ app = FastAPI(title="Telerisco RPA", version="1.0.0")
 
 TELERISCO_USER = os.environ.get("TELERISCO_USER", "")
 TELERISCO_PASS = os.environ.get("TELERISCO_PASS", "")
+API_KEY        = os.environ.get("API_KEY", "")
 
 VITRINE_URL = "https://vitrine.telerisco.com.br/"
 APP_URL     = "https://api.telerisco.com.br/telerisco/operacional/"
+
+_api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+
+async def require_api_key(key: str = Security(_api_key_header)):
+    if not API_KEY:
+        return  # sem API_KEY configurada, acesso livre
+    if key != API_KEY:
+        raise HTTPException(401, "API Key inválida ou ausente.")
 
 
 async def run_rpa(username: str, password: str) -> bytes:
@@ -234,7 +244,8 @@ async def health():
     return {"status": "ok", "service": "Telerisco RPA"}
 
 
-@app.get("/screenshot", summary="Retorna screenshot do último estado capturado")
+@app.get("/screenshot", summary="Retorna screenshot do último estado capturado",
+         dependencies=[Security(require_api_key)])
 async def screenshot():
     if not os.path.exists(LAST_SCREENSHOT):
         raise HTTPException(404, "Nenhum screenshot disponível.")
@@ -244,7 +255,8 @@ async def screenshot():
 @app.get(
     "/exportar-motoristas",
     summary="Executa RPA e retorna XLS de motoristas vinculados",
-    response_class=Response
+    response_class=Response,
+    dependencies=[Security(require_api_key)]
 )
 async def exportar_motoristas(
     usuario: str = Query(default=None, description="Login (sobrescreve ENV TELERISCO_USER)"),
