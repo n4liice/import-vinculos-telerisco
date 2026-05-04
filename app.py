@@ -102,7 +102,11 @@ async def run_rpa(username: str, password: str) -> bytes:
                 await page.screenshot(path=LAST_SCREENSHOT, full_page=True)
 
             # ── 8. TELA DE DOWNLOADS ──────────────────────────────────────────
-            await page.wait_for_url("**servico-download**", timeout=15000)
+            # Aguarda redirecionamento automático ou navega diretamente
+            try:
+                await page.wait_for_url("**servico-download**", timeout=10000)
+            except Exception:
+                await page.goto(f"{APP_URL}#/servico-download", wait_until="networkidle", timeout=15000)
             await page.wait_for_load_state("networkidle")
 
             # ── 9. POLLING: aguarda "Finalizado" ──────────────────────────────
