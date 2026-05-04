@@ -68,37 +68,38 @@ async def run_rpa(username: str, password: str) -> bytes:
             await page.click("button:has-text('XLS')")
 
             # ── 7. MODAL DE CONFIRMAÇÃO ───────────────────────────────────────
-            # Aguarda bootbox VISÍVEL (não apenas existir no DOM)
             try:
                 await page.locator(".bootbox").wait_for(state="visible", timeout=15000)
-            except Exception:
-                # Sem modal: exportação pode ter sido enfileirada diretamente
-                await page.screenshot(path=LAST_SCREENSHOT)
-                pass
-            else:
-                await page.screenshot(path=LAST_SCREENSHOT)
-                confirmed = False
-                for selector in [
-                    ".bootbox-footer button:has-text('Sim')",
-                    ".bootbox-footer button:has-text('OK')",
-                    ".bootbox-footer button:has-text('Ok')",
-                    ".bootbox-footer .btn-primary",
-                    ".modal-footer .btn-primary",
-                    ".bootbox button.btn-primary",
-                    ".bootbox button",
-                ]:
-                    try:
-                        btn = page.locator(selector).first
-                        if await btn.is_visible(timeout=2000):
-                            await btn.click()
-                            confirmed = True
-                            break
-                    except Exception:
-                        continue
+                await asyncio.sleep(1)
+                await page.screenshot(path=LAST_SCREENSHOT, full_page=True)
 
-                if not confirmed:
-                    await page.screenshot(path=LAST_SCREENSHOT)
-                    raise HTTPException(500, "Não foi possível clicar no botão de confirmação do modal.")
+                # Tenta clique via JavaScript direto (ignora seletor CSS)
+                clicked = await page.evaluate("""
+                    () => {
+                        const selectors = [
+                            '.bootbox-footer button',
+                            '.modal-footer button',
+                            '.bootbox button',
+                            '.modal button.btn-primary',
+                            '.modal button',
+                        ];
+                        for (const sel of selectors) {
+                            const btn = document.querySelector(sel);
+                            if (btn) { btn.click(); return btn.textContent.trim(); }
+                        }
+                        return null;
+                    }
+                """)
+
+                if not clicked:
+                    modal_html = await page.locator(".bootbox").inner_html()
+                    raise HTTPException(500, f"Modal visível mas sem botão. HTML: {modal_html[:800]}")
+
+            except HTTPException:
+                raise
+            except Exception:
+                # Sem modal visível: exportação pode ter sido enfileirada diretamente
+                await page.screenshot(path=LAST_SCREENSHOT, full_page=True)
 
             # ── 8. TELA DE DOWNLOADS ──────────────────────────────────────────
             await page.wait_for_url("**servico-download**", timeout=15000)
