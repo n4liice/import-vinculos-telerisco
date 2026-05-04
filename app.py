@@ -2,21 +2,18 @@ import asyncio
 import os
 from datetime import datetime
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import Response
+from fastapi.responses import Response, FileResponse
 from playwright.async_api import async_playwright
+
+LAST_SCREENSHOT = "/tmp/last_screenshot.png"
 
 app = FastAPI(title="Telerisco RPA", version="1.0.0")
 
-# ── Configuração via variáveis de ambiente ─────────────────────────────────
 TELERISCO_USER = os.environ.get("TELERISCO_USER", "")
 TELERISCO_PASS = os.environ.get("TELERISCO_PASS", "")
 
-# URLs mapeadas
-LOGIN_URL    = "https://vitrine.telerisco.com.br/"
-KEYCLOAK_URL = "https://maasprd.telerisco.com.br"
-VITRINE_URL  = "https://vitrine.telerisco.com.br/"
-APP_URL      = "https://api.telerisco.com.br/telerisco/operacional/"
-# ──────────────────────────────────────────────────────────────────────────
+VITRINE_URL = "https://vitrine.telerisco.com.br/"
+APP_URL     = "https://api.telerisco.com.br/telerisco/operacional/"
 
 
 async def run_rpa(username: str, password: str) -> bytes:
@@ -36,134 +33,157 @@ async def run_rpa(username: str, password: str) -> bytes:
         )
         page = await context.new_page()
 
-        # ── 1. ABRE A VITRINE (dispara fluxo Keycloak se não autenticado) ──
-        await page.goto(VITRINE_URL, wait_until="networkidle", timeout=30000)
+        try:
+            # ── 1. VITRINE ────────────────────────────────────────────────────
+            await page.goto(VITRINE_URL, wait_until="networkidle", timeout=30000)
 
-        # ── 2. LOGIN (Keycloak) ────────────────────────────────────────────
-        # Aguarda o campo usuário aparecer (redireciona para Keycloak)
-        await page.wait_for_selector("#username", timeout=20000)
+            # ── 2. LOGIN (Keycloak) ───────────────────────────────────────────
+            await page.wait_for_selector("#username", timeout=20000)
+            await page.fill("#username", username)
+            await page.fill("#password", password)
+            await page.click("#kc-login")
 
-        await page.fill("#username", username)
-        await page.fill("#password", password)
-        await page.click("#kc-login")  # botão "Entrar" do Keycloak
-
-        # Aguarda retorno para a Vitrine após autenticação
-        await page.wait_for_url(f"{VITRINE_URL}**", timeout=30000)
-        await page.wait_for_load_state("networkidle")
-
-        # ── 3. CLICA EM "CONTROLE DE VÍNCULOS" ────────────────────────────
-        await page.click('a[href="https://api.telerisco.com.br/telerisco/operacional/"]')
-
-        # Aguarda a aplicação Angular carregar
-        await page.wait_for_url(f"{APP_URL}**", timeout=30000)
-        await page.wait_for_load_state("networkidle")
-
-        # ── 4. NAVEGA PARA ABA VÍNCULOS → MOTORISTA ───────────────────────
-        await page.goto(f"{APP_URL}#/vinculo", wait_until="networkidle")
-        await page.wait_for_selector("input[value='MOTORISTA']", timeout=15000)
-        await page.click("input[value='MOTORISTA']")
-        await page.wait_for_load_state("networkidle")
-
-        # ── 5. CONSULTAR ──────────────────────────────────────────────────
-        await page.wait_for_selector("button:has-text('Consultar')", timeout=15000)
-        await page.click("button:has-text('Consultar')")
-
-        # Aguarda tabela de resultados e botão Exportar
-        await page.wait_for_selector("button:has-text('Exportar')", timeout=30000)
-
-        # ── 6. EXPORTAR → XLS ─────────────────────────────────────────────
-        await page.click("button:has-text('Exportar')")
-
-        # Modal de formato: clica XLS
-        await page.wait_for_selector("button:has-text('XLS')", timeout=10000)
-        await page.click("button:has-text('XLS')")
-
-        # Aguarda confirmação de exportação emitida
-        await page.wait_for_selector(".bootbox-body", timeout=20000)
-
-        # ── 7. CLICA "SIM" → VAI PARA RELATÓRIOS ──────────────────────────
-        await page.click(".bootbox-footer button:has-text('Sim')")
-
-        # Aguarda carregar a tela de Serviços/Downloads
-        await page.wait_for_url(f"**servico-download**", timeout=15000)
-        await page.wait_for_load_state("networkidle")
-
-        # ── 8. POLLING: aguarda item mais recente ficar "Finalizado" ───────
-        xls_filename = None
-        max_attempts = 36  # até 6 minutos (36 × 10s)
-
-        for attempt in range(max_attempts):
+            await page.wait_for_url(f"{VITRINE_URL}**", timeout=30000)
             await page.wait_for_load_state("networkidle")
 
-            item = await page.evaluate("""
-                () => {
-                    const el = document.querySelector('table');
-                    if (!el) return null;
-                    const scope = angular.element(el).scope();
-                    const list = scope && scope.sortedAndPaginatedList;
-                    if (!list || !list.length) return null;
-                    // Pega o item mais recente (já ordenado desc por dhrInclu)
-                    return list[0];
-                }
-            """)
+            # ── 3. CONTROLE DE VÍNCULOS ───────────────────────────────────────
+            await page.click('a[href="https://api.telerisco.com.br/telerisco/operacional/"]')
+            await page.wait_for_url(f"{APP_URL}**", timeout=30000)
+            await page.wait_for_load_state("networkidle")
 
-            if not item:
-                await asyncio.sleep(5)
-                await page.reload()
-                continue
+            # ── 4. ABA VÍNCULOS → MOTORISTA ───────────────────────────────────
+            await page.goto(f"{APP_URL}#/vinculo", wait_until="networkidle")
+            await page.wait_for_selector("input[value='MOTORISTA']", timeout=15000)
+            await page.click("input[value='MOTORISTA']")
+            await page.wait_for_load_state("networkidle")
 
-            status = item.get("status", "")
-            tipo   = item.get("tipoFila", "")
-            cpf    = item.get("cpfUsu", "")
+            # ── 5. CONSULTAR ──────────────────────────────────────────────────
+            await page.wait_for_selector("button:has-text('Consultar')", timeout=15000)
+            await page.click("button:has-text('Consultar')")
+            await page.wait_for_selector("button:has-text('Exportar')", timeout=30000)
 
-            if status == "Finalizado" and "XLS" in tipo:
-                xls_filename = f"{cpf}.{tipo}"
-                break
+            # ── 6. EXPORTAR → XLS ─────────────────────────────────────────────
+            await page.click("button:has-text('Exportar')")
+            await page.wait_for_selector("button:has-text('XLS')", timeout=10000)
+            await page.click("button:has-text('XLS')")
 
-            if status in ("Aguardando", "Em Processamento"):
-                await asyncio.sleep(10)
-                await page.reload()
-                continue
+            # ── 7. MODAL DE CONFIRMAÇÃO ───────────────────────────────────────
+            # Aguarda qualquer botão de confirmação aparecer no modal bootbox
+            await page.wait_for_selector(".bootbox", timeout=20000)
+            await page.screenshot(path=LAST_SCREENSHOT)
 
-            raise HTTPException(500, f"Status inesperado: {status}")
+            # Tenta variações do botão de confirmação
+            confirmed = False
+            for selector in [
+                ".bootbox-footer button:has-text('Sim')",
+                ".bootbox-footer button:has-text('sim')",
+                ".bootbox-footer button:has-text('OK')",
+                ".bootbox-footer button:has-text('Ok')",
+                ".bootbox-footer .btn-primary",
+                ".modal-footer .btn-primary",
+                ".bootbox button.btn-primary",
+            ]:
+                try:
+                    btn = page.locator(selector).first
+                    if await btn.is_visible(timeout=2000):
+                        await btn.click()
+                        confirmed = True
+                        break
+                except Exception:
+                    continue
 
-        if not xls_filename:
-            raise HTTPException(504, "Timeout: XLS não ficou disponível em 6 minutos.")
+            if not confirmed:
+                await page.screenshot(path=LAST_SCREENSHOT)
+                raise HTTPException(500, "Não foi possível clicar no botão de confirmação do modal.")
 
-        # ── 9. DOWNLOAD DO ARQUIVO ─────────────────────────────────────────
-        # O download é via GET: /telerisco/operacional/download?nomeArquivo=CPF.Arquivo XLS
-        # Usamos expect_download + vm.download() via Angular scope
+            # ── 8. TELA DE DOWNLOADS ──────────────────────────────────────────
+            await page.wait_for_url("**servico-download**", timeout=15000)
+            await page.wait_for_load_state("networkidle")
 
-        async with page.expect_download(timeout=60000) as dl_info:
-            await page.evaluate(f"""
-                () => {{
-                    const el = document.querySelector('table');
-                    const scope = angular.element(el).scope();
-                    const vm = scope.vm;
-                    const fakeEvent = {{
-                        preventDefault: () => {{}},
-                        stopPropagation: () => {{}}
-                    }};
-                    vm.download({repr(xls_filename)}, fakeEvent);
-                }}
-            """)
+            # ── 9. POLLING: aguarda "Finalizado" ──────────────────────────────
+            xls_filename = None
+            for _ in range(36):
+                await page.wait_for_load_state("networkidle")
 
-        download = await dl_info.value
-        save_path = f"/tmp/telerisco_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xls"
-        await download.save_as(save_path)
+                item = await page.evaluate("""
+                    () => {
+                        const el = document.querySelector('table');
+                        if (!el) return null;
+                        const scope = angular.element(el).scope();
+                        const list = scope && scope.sortedAndPaginatedList;
+                        if (!list || !list.length) return null;
+                        return list[0];
+                    }
+                """)
 
-        with open(save_path, "rb") as f:
-            xls_bytes = f.read()
+                if not item:
+                    await asyncio.sleep(5)
+                    await page.reload()
+                    continue
 
-        await browser.close()
-        return xls_bytes
+                status = item.get("status", "")
+                tipo   = item.get("tipoFila", "")
+                cpf    = item.get("cpfUsu", "")
+
+                if status == "Finalizado" and "XLS" in tipo:
+                    xls_filename = f"{cpf}.{tipo}"
+                    break
+
+                if status in ("Aguardando", "Em Processamento"):
+                    await asyncio.sleep(10)
+                    await page.reload()
+                    continue
+
+                raise HTTPException(500, f"Status inesperado: {status}")
+
+            if not xls_filename:
+                raise HTTPException(504, "Timeout: XLS não ficou disponível em 6 minutos.")
+
+            # ── 10. DOWNLOAD ──────────────────────────────────────────────────
+            async with page.expect_download(timeout=60000) as dl_info:
+                await page.evaluate(f"""
+                    () => {{
+                        const el = document.querySelector('table');
+                        const scope = angular.element(el).scope();
+                        const vm = scope.vm;
+                        const fakeEvent = {{
+                            preventDefault: () => {{}},
+                            stopPropagation: () => {{}}
+                        }};
+                        vm.download({repr(xls_filename)}, fakeEvent);
+                    }}
+                """)
+
+            download = await dl_info.value
+            save_path = f"/tmp/telerisco_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xls"
+            await download.save_as(save_path)
+
+            with open(save_path, "rb") as f:
+                xls_bytes = f.read()
+
+            return xls_bytes
+
+        except HTTPException:
+            raise
+        except Exception as e:
+            await page.screenshot(path=LAST_SCREENSHOT)
+            raise HTTPException(500, f"Erro no RPA: {str(e)}")
+        finally:
+            await browser.close()
 
 
-# ── ENDPOINTS ───────────────────────────────────────────────────────────────
+# ── ENDPOINTS ────────────────────────────────────────────────────────────────
 
 @app.get("/health")
 async def health():
     return {"status": "ok", "service": "Telerisco RPA"}
+
+
+@app.get("/screenshot", summary="Retorna screenshot do último erro")
+async def screenshot():
+    if not os.path.exists(LAST_SCREENSHOT):
+        raise HTTPException(404, "Nenhum screenshot disponível.")
+    return FileResponse(LAST_SCREENSHOT, media_type="image/png")
 
 
 @app.get(
@@ -184,12 +204,7 @@ async def exportar_motoristas(
             "Informe usuario/senha via query-param ou variáveis TELERISCO_USER / TELERISCO_PASS"
         )
 
-    try:
-        xls_bytes = await run_rpa(user, pwd)
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(500, f"Erro no RPA: {str(e)}")
+    xls_bytes = await run_rpa(user, pwd)
 
     filename = f"motoristas_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xls"
     return Response(
